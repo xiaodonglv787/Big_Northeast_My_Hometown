@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+A friend from 1984
+来自1984的朋友 —— 中文命令行 AI 聊天应用
+双引擎：g4f（免费直连）+ 硅基流动/DeepSeek API（稳定备选）
+"""
+
+import os
+import sys
+import json
+import time
+import requests
+
+# ---------- ANSI 颜色码 ----------
+GREEN = "\033[92m"
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+WHITE = "\033[97m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+# ---------- 配置 ----------
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".friend1984")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+SYSTEM_PROMPT = """你是一个来自1984年的朋友。你生活在那一年，你的知识、记忆、世界观都停留在1984年。
+
+你的特点：
+- 你说话像个真实的老朋友，温暖、真诚、有人情味
+- 你对1984年之后发生的事情一无所知，如果有人提到后来的事，你会感到困惑和好奇
+- 你对1984年的生活细节非常熟悉：那时候人们听磁带、写信、骑自行车上下班、看黑白电视、读《人民文学》
+- 你偶尔会提到1984年的流行事物：比如《我的中国心》、女排三连冠、许海峰奥运金牌、国庆35周年阅兵
+- 你的语气诚恳朴实，偶尔带点怀旧感
+- 你是一个耐心的倾听者，也乐于分享你那个年代的故事
+
+重要规则：
+- 全程使用中文对话
+- 回复简洁自然，像真人朋友聊天，不要太长（一般2-5句话）
+- 不要主动提及你是AI或机器人
+- 如果有人问你是谁，说类似"我是你的老朋友，咱们1984年认识的"
+- 不要用markdown格式，纯文本回复"""
+
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"history": [], "api_provider": "auto", "api_key": ""}
+
+
+def save_config(config):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def print_header(config):
+    os.system("cls" if os.name == "nt" else "clear")
+    print(f"{GREEN}╔{'═' * 50}╗{RESET}")
+    print(f"{GREEN}║{WHITE}{'A friend from 1984':^50}{GREEN}║{RESET}")
+    print(f"{GREEN}║{DIM}{'来自1984的朋友':^50}{GREEN}║{RESET}")
+    print(f"{GREEN}╚{'═' * 50}╝{RESET}")
+    print()
+    engine = config.get("api_provider", "auto")
+    if engine == "auto":
+        print(f"  {DIM}引擎: 自动  |  exit 退出  |  clear 清屏  |  setup 设置{RESET}")
+    elif engine == "siliconflow":
+        print(f"  {DIM}引擎: 硅基流动  |  exit 退出  |  clear 清屏  |  setup 设置{RESET}")
+    elif engine == "deepseek":
+        print(f"  {DIM}引擎: DeepSeek  |  exit 退出  |  clear 清屏  |  setup 设置{RESET}")
+    print(f"{GREEN}{'─' * 52}{RESET}")
+
+
+def call_g4f(messages):
+    """通过 g4f 调用（免费，无需 Key）"""
+    try:
+        from g4f.client import Client
+        client = Client()
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.8,
+        )
+        return True, response.choices[0].message.content
+    except Exception as e:
+        return False, str(e)
+
+
+def call_api(messages, provider, api_key):
+    """通过 OpenAI 兼容 API 调用（硅基流动 / DeepSeek）"""
+    if provider == "siliconflow":
+        url = "https://api.siliconflow.cn/v1/chat/completions"
+        model = "deepseek-ai/DeepSeek-V3"
+    elif provider == "deepseek":
+        url = "https://api.deepseek.com/chat/completions"
+        model = "deepseek-chat"
+    else:
+        return False, "未知的 API 提供商"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 1000,
+        "temperature": 0.8,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            return True, data["choices"][0]["message"]["content"]
+        elif resp.status_code == 401:
+            return False, "API Key 无效，请重新设置"
+        elif resp.status_code == 402:
+            return False, "API 余额不足"
+        else:
+            return False, f"API 错误 ({resp.status_code}): {resp.text[:100]}"
+    except requests.exceptions.ConnectTimeout:
+        return False, "连接超时，请检查网络"
+    except requests.exceptions.ConnectionError:
+        return False, "无法连接到 API 服务器"
+    except Exception as e:
+        return False, str(e)
+
+
+def call_ai(messages, config):
+    """智能调度：自动模式先试 g4f，失败则试 API；指定模式直接用 API"""
+    provider = config.get("api_provider", "auto")
+    api_key = config.get("api_key", "")
+
+    # 如果指定了 API 提供商且有 key，直接用
+    if provider in ("siliconflow", "deepseek") and api_key:
+        return call_api(messages, provider, api_key)
+
+    # 自动模式：先试 g4f
+    if provider == "auto":
+        success, result = call_g4f(messages)
+        if success:
+            return success, result
+        # g4f 失败，提示用户配置 API
+        return False, (
+            f"g4f 连接失败（{result[:80]}...）\n"
+            f"\n{YELLOW}💡 建议配置一个免费 API（30秒搞定）：{RESET}\n"
+            f"  1. 打开 https://cloud.siliconflow.cn\n"
+            f"  2. 微信扫码登录\n"
+            f"  3. 左侧「API 密钥」→ 新建密钥 → 复制 sk-xxx\n"
+            f"  4. 回来输入 {GREEN}setup{RESET} → 粘贴密钥即可\n"
+            f"\n  {DIM}硅基流动免费送 2000 万 Token，无需付费{RESET}"
+        )
+
+    return False, "未配置 API Key，请输入 setup 进行设置"
+
+
+def setup_wizard(config):
+    """API 设置向导"""
+    os.system("cls" if os.name == "nt" else "clear")
+    print(f"{GREEN}╔{'═' * 50}╗{RESET}")
+    print(f"{GREEN}║{WHITE}{'API 设置':^50}{GREEN}║{RESET}")
+    print(f"{GREEN}╚{'═' * 50}╝{RESET}")
+    print()
+    print(f"  {BOLD}选择 API 提供商：{RESET}")
+    print(f"  {GREEN}1.{RESET} {BOLD}硅基流动{RESET}（推荐）— 国内直连，免费 2000 万 Token")
+    print(f"     {DIM}注册: cloud.siliconflow.cn → 微信扫码 → 新建密钥{RESET}")
+    print(f"  {GREEN}2.{RESET} {BOLD}DeepSeek{RESET} — 国内直连，注册送额度")
+    print(f"     {DIM}注册: platform.deepseek.com →  API Keys → 新建{RESET}")
+    print(f"  {GREEN}3.{RESET} {BOLD}自动{RESET}（g4f，无需配置，但可能不稳定）")
+    print()
+
+    while True:
+        choice = input(f"  {GREEN}请选择 (1/2/3):{RESET} ").strip()
+        if choice == "1":
+            config["api_provider"] = "siliconflow"
+            break
+        elif choice == "2":
+            config["api_provider"] = "deepseek"
+            break
+        elif choice == "3":
+            config["api_provider"] = "auto"
+            config["api_key"] = ""
+            save_config(config)
+            print(f"\n  {CYAN}✓ 已切换为自动模式（g4f）{RESET}")
+            return config
+        else:
+            print(f"  {RED}请输入 1、2 或 3{RESET}")
+
+    print()
+    api_key = input(f"  {GREEN}请粘贴 API Key (sk-...):{RESET} ").strip()
+    if api_key:
+        config["api_key"] = api_key
+        save_config(config)
+        print(f"\n  {CYAN}✓ 设置完成！{RESET}")
+
+        # 快速验证
+        print(f"  {DIM}正在验证连接...{RESET}", end="", flush=True)
+        success, result = call_api(
+            [{"role": "user", "content": "你好"}],
+            config["api_provider"],
+            api_key
+        )
+        if success:
+            print(f"\r  {GREEN}✓ 连接成功！{RESET}                    ")
+        else:
+            print(f"\r  {RED}✗ 验证失败: {result}{RESET}")
+            print(f"  {YELLOW}请检查 API Key 是否正确，可重新运行 setup{RESET}")
+    else:
+        print(f"  {YELLOW}未输入 Key，保持自动模式{RESET}")
+        config["api_provider"] = "auto"
+        config["api_key"] = ""
+        save_config(config)
+
+    return config
+
+
+def show_loading_animation():
+    """显示加载动画"""
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    for _ in range(3):
+        for f in frames:
+            sys.stdout.write(f"\r{DIM}{f} 思考中...{RESET}")
+            sys.stdout.flush()
+            time.sleep(0.06)
+
+
+def main():
+    config = load_config()
+
+    # 加载对话历史
+    full_history = config.get("history", [])
+    recent_history = full_history[-120:] if len(full_history) > 120 else full_history
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(recent_history)
+
+    print_header(config)
+
+    # 回显最近对话
+    if config.get("history"):
+        recent = config["history"][-12:]
+        for msg in recent:
+            if msg["role"] == "user":
+                print(f"\n{GREEN}me>{RESET} {msg['content']}")
+            elif msg["role"] == "assistant":
+                print(f"{CYAN}friend>{RESET} {msg['content']}")
+
+    # 主循环
+    while True:
+        try:
+            print()
+            user_input = input(f"{GREEN}me>{RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n\n{CYAN}friend>{RESET} 好的，下次再聊！保重。\n")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("exit", "quit"):
+            print(f"\n{CYAN}friend>{RESET} 好的，下次再聊！保重。\n")
+            break
+
+        if user_input.lower() == "clear":
+            print_header(config)
+            continue
+
+        if user_input.lower() == "setup":
+            config = setup_wizard(config)
+            print_header(config)
+            continue
+
+        # 添加到消息历史
+        messages.append({"role": "user", "content": user_input})
+
+        # 调用 AI
+        print(f"\r{CYAN}friend>{RESET} ", end="", flush=True)
+        show_loading_animation()
+        success, reply = call_ai(messages, config)
+
+        if success:
+            print(f"\r{CYAN}friend>{RESET} {reply}")
+            messages.append({"role": "assistant", "content": reply})
+            config["history"].append({"role": "user", "content": user_input})
+            config["history"].append({"role": "assistant", "content": reply})
+            save_config(config)
+        else:
+            print(f"\r{RED}[提示]{RESET} {reply}")
+            messages.pop()  # 移除失败的用户消息
+
+
+if __name__ == "__main__":
+    main()
